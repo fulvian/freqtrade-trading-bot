@@ -1482,22 +1482,28 @@ class IchimokuLLMMultiTimeframeWithLeverageOptimizedV2(IStrategy):
     def custom_stoploss(self, pair: str, trade: Trade, current_time: datetime,
                        current_rate: float, current_profit: float, after_fill: bool, **kwargs) -> float | None:
         """
-        🚀 CONTEXT7 SUPER POWERS V2: TRAILING TAKE PROFIT CORRETTO CON CUSCINETTO DINAMICO
+        🚀 CONTEXT7 SUPER POWERS V3: TRAILING STOP RIPRISTINATO (VERSIONE FUNZIONANTE)
 
-        LOGICA ESATTA CONTEXT7 COMPLIANT:
+        LOGICA ESATTA BASATA SU VERSIONE TESTATA:
         1. Attivazione solo sopra 0.5% di profitto
         2. Trailing con cuscinetto dinamico: 25% sotto 7.5%, 15% sopra 7.5%
-        3. BLOCCAGGIO PERMANENTE del trailing stop quando il profitto diminuisce
-        4. Take profit automatico quando si tocca lo stop BLOCCATO
+        3. Bloccaggio quando il profitto diminuisce
+        4. Take profit automatico al tocco del trailing stop
 
-        Esempio: Massimo 2% → Stop a 2% - 15% = 1.7% → BLOCCATO → Take profit a 1.7%
+        🚨 CORREZIONE: Tornato alla logica funzionante di b3e5afbfc
         """
         try:
-            # Inizializza tracking del profitto massimo per trade
+            # DEBUG: Verifica stato tracking
             if not hasattr(self, '_max_profit_tracking'):
                 self._max_profit_tracking = {}
+                self.logger.info(f"🔧 DEBUG: Inizializzato _max_profit_tracking per {pair}")
 
             trade_key = f"{pair}_{trade.id}"
+
+            # DEBUG: Log stato corrente
+            if trade_key in self._max_profit_tracking:
+                tracking = self._max_profit_tracking[trade_key]
+                self.logger.info(f"🔧 DEBUG {pair}: Profitto={current_profit:.3%}, Max={tracking.get('max_profit', 0):.3%}, Locked={tracking.get('is_locked', False)}")
 
             # 🎯 SOGLIA ATTIVAZIONE: Solo sopra 0.5% di profitto
             activation_threshold = 0.005  # 0.5%
@@ -1505,6 +1511,7 @@ class IchimokuLLMMultiTimeframeWithLeverageOptimizedV2(IStrategy):
             if current_profit < activation_threshold:
                 # Sotto soglia: resetta tracking e usa stop loss normale
                 if trade_key in self._max_profit_tracking:
+                    self.logger.info(f"🔧 DEBUG {pair}: Sotto soglia, rimuovo tracking")
                     del self._max_profit_tracking[trade_key]
                 return None  # Usa stop loss normale
 
@@ -1512,18 +1519,19 @@ class IchimokuLLMMultiTimeframeWithLeverageOptimizedV2(IStrategy):
             if trade_key not in self._max_profit_tracking:
                 self._max_profit_tracking[trade_key] = {
                     'max_profit': current_profit,
-                    'locked_stop': None,  # 🛡️ CAMBIATO: trailing_stop → locked_stop
+                    'trailing_stop': None,  # 🛡️ RIPRISTINATO: locked_stop → trailing_stop
                     'is_locked': False
                 }
                 self.logger.info(f"🎯 TRAILING TAKE PROFIT ATTIVATO per {pair}: {current_profit:.2%}")
 
             tracking = self._max_profit_tracking[trade_key]
 
-            # 📈 NUOVO MASSIMO: Aggiorna solo se il profitto aumenta e non è ancora bloccato
-            if current_profit > tracking['max_profit'] and not tracking['is_locked']:
+            # 📈 AGGIORNAMENTO MASSIMO: Solo se il profitto aumenta (LOGICA RIPRISTINATA)
+            if current_profit > tracking['max_profit']:
                 tracking['max_profit'] = current_profit
+                tracking['is_locked'] = False  # Sblocca per nuovo massimo
 
-                # 🎯 CALCOLO TRAILING CON CUSCINETTO DINAMICO CONTEXT7
+                # 🎯 CALCOLO TRAILING CON CUSCINETTO DINAMICO
                 # Sotto 7.5%: 25% di cuscinetto | Sopra 7.5%: 15% di cuscinetto
 
                 if tracking['max_profit'] <= 0.075:  # Sotto o uguale a 7.5%
@@ -1534,48 +1542,38 @@ class IchimokuLLMMultiTimeframeWithLeverageOptimizedV2(IStrategy):
                     cushion_type = "AGGRESSIVE (15%)"
 
                 # Formula: Stop = ProfittoMassimo - (ProfittoMassimo × Cushion%)
-                new_stop_pct = tracking['max_profit'] - (tracking['max_profit'] * cushion_pct)
+                trailing_stop_pct = tracking['max_profit'] - (tracking['max_profit'] * cushion_pct)
 
                 # Minimum safety buffer: sempre almeno 0.2% di profitto garantito
-                new_stop_pct = max(new_stop_pct, 0.002)
+                trailing_stop_pct = max(trailing_stop_pct, 0.002)
 
-                # 🛡️ CRUCIAL: Aggiorna solo lo stop BLOCCATO se è migliore del precedente
-                if tracking['locked_stop'] is None or new_stop_pct > tracking['locked_stop']:
-                    tracking['locked_stop'] = new_stop_pct
-                    self.logger.info(f"📈 NUOVO MASSIMO {pair}: {tracking['max_profit']:.2%} → STOP BLOCCATO: {tracking['locked_stop']:.2%} ({cushion_type})")
+                tracking['trailing_stop'] = trailing_stop_pct
 
-            # 🔒 BLOCCAGGIO TRAILING: Quando il profitto diminuisce dal massimo
+                self.logger.info(f"📈 NUOVO MASSIMO {pair}: {tracking['max_profit']:.2%} → TRAILING: {trailing_stop_pct:.2%} ({cushion_type})")
+
+            # 🔒 BLOCCAGGIO TRAILING: Quando il profitto diminuisce (LOGICA RIPRISTINATA)
             elif current_profit < tracking['max_profit'] and not tracking['is_locked']:
                 tracking['is_locked'] = True
-                # Calcola lo stop finale basato sul massimo raggiunto
-                if tracking['max_profit'] <= 0.075:
-                    cushion_pct = 0.25
-                    cushion_type = "CONSERVATIVE (25%)"
+                # Null safety check prima del logging
+                if tracking['trailing_stop'] is not None:
+                    self.logger.info(f"🔒 TRAILING BLOCCATO {pair}: Massimo {tracking['max_profit']:.2%} → Stop: {tracking['trailing_stop']:.2%}")
                 else:
-                    cushion_pct = 0.15
-                    cushion_type = "AGGRESSIVE (15%)"
+                    self.logger.info(f"🔒 TRAILING BLOCCATO {pair}: Massimo {tracking['max_profit']:.2%} → Stop: Calcolo in corso...")
 
-                final_stop = tracking['max_profit'] - (tracking['max_profit'] * cushion_pct)
-                final_stop = max(final_stop, 0.002)
-
-                tracking['locked_stop'] = final_stop
-                self.logger.info(f"🔒 TRAILING BLOCCATO {pair}: Massimo {tracking['max_profit']:.2%} → STOP FINALE: {tracking['locked_stop']:.2%} ({cushion_type})")
-
-            # 💥 TAKE PROFIT: Attivazione quando il profitto tocca lo stop BLOCCATO
+            # 💥 TAKE PROFIT: Attivazione quando il profitto tocca lo stop bloccato
             if (tracking['is_locked'] and
-                tracking['locked_stop'] is not None and
-                current_profit <= tracking['locked_stop']):
-                self.logger.info(f"💥 TAKE PROFIT ESEGUITO {pair}: Profitto {current_profit:.2%} ≤ Stop {tracking['locked_stop']:.2%}")
-                # Pulisci tracking dopo take profit
-                del self._max_profit_tracking[trade_key]
+                tracking['trailing_stop'] is not None and
+                current_profit <= tracking['trailing_stop']):
+                self.logger.info(f"💥 TAKE PROFIT ESEGUITO {pair}: Profitto {current_profit:.2%} ≤ Stop {tracking['trailing_stop']:.2%}")
+                # ⚠️ RIMOSSO: Non pulire tracking qui (lo fa custom_exit)
                 # Restituisci lo stop per eseguire immediatamente il take profit
-                return tracking['locked_stop']
+                return tracking['trailing_stop']
 
-            # 🛡️ PROTEZIONE CRUCIALE: Restituisci SEMPRE lo stop BLOCCATO, non il calcolato dinamicamente
-            if tracking['locked_stop'] is not None:
-                return tracking['locked_stop']
+            # 🛡️ PROTEZIONE: Restituisci trailing stop corrente con null safety
+            if tracking['trailing_stop'] is not None:
+                return tracking['trailing_stop']
 
-            # Fallback: Nessun trailing stop attivo
+            # Fallback: Nessun azione
             return None
 
         except Exception as e:
@@ -1585,32 +1583,23 @@ class IchimokuLLMMultiTimeframeWithLeverageOptimizedV2(IStrategy):
     def custom_exit(self, pair: str, trade: 'Trade', current_time: datetime,
                    current_rate: float, current_profit: float, **kwargs) -> str:
         """
-        Context7 Super Powers V2: Custom exit con cooling-off system anti-revenge trading
+        🚀 CONTEXT7 SUPER POWERS V3: REVENGE TRADING CORRETTO
 
-        I custom exit signals sono disabilitati per garantire il massimo rendimento
-        del trailing take profit, ma questo metodo gestisce l'attivazione del
-        cooling-off system quando viene raggiunto il take profit.
+        🚨 CORREZIONE FONDAMENTALE: Il cooling-off si attiva SOLO su uscite reali,
+        non su massimi temporanei intra-trade.
         """
-        # 🛡️ COOLING-OFF SYSTEM: Attiva pausa anti-revenge trading dopo take profit
+        # 🛡️ COOLING-OFF SYSTEM: Attiva pausa anti-revenge trading SOLO su uscite reali
         try:
-            # Verifica se questo è un evento di take profit (trailing stop attivato)
-            if hasattr(self, '_max_profit_tracking'):
-                trade_key = f"{pair}_{trade.id}"
+            # DEBUG: Log solo quando necessario
+            self.logger.info(f"🔧 DEBUG EXIT {pair}: Trade {trade.id}, Profitto={current_profit:.3%}, Stato={trade.is_open}")
 
-                # Se il trailing take profit era attivo, questo è un take profit
-                if trade_key in self._max_profit_tracking:
-                    tracking = self._max_profit_tracking[trade_key]
-
-                    # Take profit rilevato dal trailing stop
-                    if current_profit > 0.005:  # Profitto positivo sopra soglia
-                        self._set_cooldown(pair)
-                        self.logger.info(f"🛡️ COOLING-OFF TAKE PROFIT {pair}: Profitto {current_profit:.2%} → 15min pausa anti-revenge trading attivata")
-
-                        # Pulisci tracking per questo trade
-                        del self._max_profit_tracking[trade_key]
+            # ⚠️ IMPORTANTE: Il trailing stop gestisce autonomamente il take profit
+            # Non è necessario attivare cooling-off qui perché FreqTrade gestisce
+            # automaticamente le protezioni (CooldownPeriod, StoplossGuard, MaxDrawdown)
 
             # DISABLED: I custom exit signals sono disabilitati
             # Il trailing take profit lavora in modo autonomo ed efficace
+            # Il revenge trading è gestito dalle protezioni FreqTrade native
             return None
 
         except Exception as e:
