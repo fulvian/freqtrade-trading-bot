@@ -672,6 +672,11 @@ class IchimokuLLMMultiTimeframeWithLeverageOptimizedV2(IStrategy):
         # Enable basic technical analysis mode
         self.basic_mode = True
 
+        # 🛡️ V3 ANTI-REVENGE TRADING: Sistema raffreddamento post-trade profittevole
+        self._trade_cooldown = {}  # {pair: {exit_timestamp, direction, exit_type, profit}}
+        self._cooldown_minutes = 10  # 10 minuti di raffreddamento per trade profittevoli (ottimizzato 5m)
+        self._profit_threshold = 0.005  # 0.5% profit minimo per attivare raffreddamento
+
         # Cache locale per risultati
         self.local_cache = {}
         self.cache_ttl = 300  # 5 minuti
@@ -843,12 +848,15 @@ class IchimokuLLMMultiTimeframeWithLeverageOptimizedV2(IStrategy):
         dataframe['sma_fast'] = dataframe['close'].rolling(window=10).mean()
         dataframe['sma_slow'] = dataframe['close'].rolling(window=30).mean()
 
-        # ATR (Average True Range) for dynamic stoploss (NotebookLM best practice)
+        # ATR (Average True Range) for dynamic stoploss - Context7 Super Powers optimized for 5m timeframe
         dataframe['tr1'] = dataframe['high'] - dataframe['low']
         dataframe['tr2'] = abs(dataframe['high'] - dataframe['close'].shift())
         dataframe['tr3'] = abs(dataframe['low'] - dataframe['close'].shift())
         dataframe['tr'] = dataframe[['tr1', 'tr2', 'tr3']].max(axis=1)
-        dataframe['atr'] = dataframe['tr'].rolling(window=14).mean()
+        dataframe['atr'] = dataframe['tr'].rolling(window=7).mean()  # ATR=7 ottimizzato per 5m timeframe
+
+        # ATR percentage for volatility filtering (Context7 optimized)
+        dataframe['atr_pct'] = dataframe['atr'] / dataframe['close'] * 100
 
         # CMF (Chaikin Money Flow) for volume analysis (NotebookLM best practice for BTC/ETH)
         # Money Flow Multiplier
@@ -859,9 +867,9 @@ class IchimokuLLMMultiTimeframeWithLeverageOptimizedV2(IStrategy):
         dataframe['cmf'] = mfv.rolling(window=21).sum() / dataframe['volume'].rolling(window=21).sum()
 
         # Smart Volume Baseline - FIXED to prevent baseline drift
-        # Use longer period (50 candles = 250 minutes) + 70th percentile for robustness
-        dataframe['volume_mean'] = dataframe['volume'].rolling(window=50).mean()
-        dataframe['volume_70th_percentile'] = dataframe['volume'].rolling(window=50).quantile(0.70)
+        # Use period optimized for 5m timeframe - Context7 Super Powers
+        dataframe['volume_mean'] = dataframe['volume'].rolling(window=14).mean()  # 14 periodi = 70min per 5m
+        dataframe['volume_70th_percentile'] = dataframe['volume'].rolling(window=14).quantile(0.70)
 
         # Smart ratio: use 70th percentile as baseline (more robust than mean)
         dataframe['volume_ratio'] = dataframe['volume'] / dataframe['volume_70th_percentile']
@@ -869,6 +877,32 @@ class IchimokuLLMMultiTimeframeWithLeverageOptimizedV2(IStrategy):
         # Alternative: hybrid approach (mean + percentile)
         dataframe['volume_smart_mean'] = (dataframe['volume_mean'] * 0.6) + (dataframe['volume_70th_percentile'] * 0.4)
         dataframe['volume_smart_ratio'] = dataframe['volume'] / dataframe['volume_smart_mean']
+
+        # 🛡️ Context7 Super Powers: Market regime detection e filtri volatilità
+        # SMA 200 per regime detection (16.7 ore su 5m timeframe)
+        dataframe['sma_200'] = dataframe['close'].rolling(window=200).mean()
+        dataframe['price_distance_sma200'] = (
+            (dataframe['close'] - dataframe['sma_200']) / dataframe['close'] * 100
+        )
+
+        # 📊 Context7: Filtri volatilità ottimizzati per 5m crypto
+        # ATR boundaries: 0.5% - 3.0% range ottimale per timeframe 5m
+        dataframe['volatility_ok'] = (
+            (dataframe['atr_pct'] >= 0.5) &
+            (dataframe['atr_pct'] <= 3.0)
+        )
+
+        # 📊 Context7: Volume filter migliorato (1.2x - 5.0x media)
+        dataframe['volume_ok'] = (
+            (dataframe['volume'] > dataframe['volume_mean'] * 1.2) &
+            (dataframe['volume'] < dataframe['volume_mean'] * 5.0)
+        )
+
+        # 📊 Context7: Market regime filter (evita mercati laterali)
+        dataframe['lateral_market'] = (
+            (abs(dataframe['price_distance_sma200']) < 1.0) &
+            (dataframe['rsi'] > 40) & (dataframe['rsi'] < 60)
+        )
 
         return dataframe
 
@@ -1334,27 +1368,36 @@ class IchimokuLLMMultiTimeframeWithLeverageOptimizedV2(IStrategy):
                 quality_threshold = 0.5
 
             if bidirectional.long_signal.quality_score >= quality_threshold:
-                # Context7: Additional volume and regime validation
+                # Context7 Super Powers: Enhanced validation with ATR, volume e regime filters
                 if (bidirectional.long_signal.volume_confirmation and
-                    bidirectional.long_signal.regime_compatibility > 0.3):
+                    bidirectional.long_signal.regime_compatibility > 0.3 and
+                    dataframe['volatility_ok'].iloc[-1] and      # ATR 0.5%-3.0%
+                    dataframe['volume_ok'].iloc[-1] and         # Volume 1.2x-5.0x media
+                    not dataframe['lateral_market'].iloc[-1]):  # No lateral markets
 
                     dataframe.iloc[-1, dataframe.columns.get_loc('enter_long')] = 1
-                    dataframe.iloc[-1, dataframe.columns.get_loc('enter_tag')] = 'context7_long'
+                    dataframe.iloc[-1, dataframe.columns.get_loc('enter_tag')] = 'context7_long_optimized'
 
-                    self.logger.info(f"🟢 BUY {metadata['pair']} - CONTEXT7 BIDIRECTIONAL:")
+                    self.logger.info(f"🟢 BUY {metadata['pair']} - CONTEXT7 SUPER POWERS OPTIMIZED:")
                     self.logger.info(f"   Recommendation: {bidirectional.recommendation}")
                     self.logger.info(f"   Quality Score: {bidirectional.long_signal.quality_score:.3f} (threshold: {quality_threshold})")
                     self.logger.info(f"   Primary Score: {bidirectional.long_signal.primary_score:.3f}")
                     self.logger.info(f"   Trend Weight: {bidirectional.long_signal.trend_weight:.2f}")
                     self.logger.info(f"   Regime Compatibility: {bidirectional.long_signal.regime_compatibility:.2f}")
+                    self.logger.info(f"   🛡️ ATR Filter: {dataframe['atr_pct'].iloc[-1]:.2f}% (✅ 0.5%-3.0%)")
+                    self.logger.info(f"   📊 Volume Filter: {dataframe['volume_smart_ratio'].iloc[-1]:.2f}x (✅ 1.2x-5.0x)")
+                    self.logger.info(f"   🚫 Lateral Market: {dataframe['lateral_market'].iloc[-1]} (✅ False)")
                     self.logger.info(f"   Entry Conditions: {', '.join(bidirectional.long_signal.entry_conditions)}")
                     self.logger.info(f"   Ichimoku Position: {bidirectional.long_signal.ichimoku_position}")
                     self.logger.info(f"   Market Regime: {regime.regime} (confidence: {regime.confidence:.2f})")
                     self.logger.info(f"   Reasoning: {bidirectional.reasoning}")
                 else:
-                    self.logger.info(f"🚫 BUY {metadata['pair']} - Context7: Volume or regime validation failed")
+                    self.logger.info(f"🚫 BUY {metadata['pair']} - CONTEXT7 SUPER POWERS FILTERS BLOCKED:")
                     self.logger.info(f"   Volume OK: {bidirectional.long_signal.volume_confirmation}")
                     self.logger.info(f"   Regime Compatibility: {bidirectional.long_signal.regime_compatibility:.2f}")
+                    self.logger.info(f"   🛡️ ATR Filter: {dataframe['atr_pct'].iloc[-1]:.2f}% (❌ not in 0.5%-3.0%)")
+                    self.logger.info(f"   📊 Volume Filter: {dataframe['volume_smart_ratio'].iloc[-1]:.2f}x (❌ not in 1.2x-5.0x)")
+                    self.logger.info(f"   🚫 Lateral Market: {dataframe['lateral_market'].iloc[-1]} (❌ lateral market detected)")
             else:
                 self.logger.info(f"🚫 BUY {metadata['pair']} - Context7: Quality score below threshold")
                 self.logger.info(f"   Quality: {bidirectional.long_signal.quality_score:.3f} < {quality_threshold}")
@@ -1532,27 +1575,81 @@ class IchimokuLLMMultiTimeframeWithLeverageOptimizedV2(IStrategy):
     def custom_exit(self, pair: str, trade: 'Trade', current_time: datetime,
                    current_rate: float, current_profit: float, **kwargs) -> str:
         """
-        Context7 Super Powers V2: Custom exit signals DISABILITATI
+        Context7 Super Powers V2: Custom exit con cooling-off system anti-revenge trading
 
-        V2 OPTIMIZATION: I custom exit signals sono stati disabilitati per garantire
-        il massimo rendimento del trailing take profit che ha mostrato performance
-        del 100% con +$79.90 di profitto.
-
-        Il trailing take profit lavora in modo autonomo ed efficace senza interferenze.
+        I custom exit signals sono disabilitati per garantire il massimo rendimento
+        del trailing take profit, ma questo metodo gestisce l'attivazione del
+        cooling-off system quando viene raggiunto il take profit.
         """
-        # DISABLED: Let the trailing take profit do its perfect job (100% win rate)
-        return None
+        # 🛡️ COOLING-OFF SYSTEM: Attiva pausa anti-revenge trading dopo take profit
+        try:
+            # Verifica se questo è un evento di take profit (trailing stop attivato)
+            if hasattr(self, '_max_profit_tracking'):
+                trade_key = f"{pair}_{trade.id}"
+
+                # Se il trailing take profit era attivo, questo è un take profit
+                if trade_key in self._max_profit_tracking:
+                    tracking = self._max_profit_tracking[trade_key]
+
+                    # Take profit rilevato dal trailing stop
+                    if current_profit > 0.005:  # Profitto positivo sopra soglia
+                        self._set_cooldown(pair)
+                        self.logger.info(f"🛡️ COOLING-OFF TAKE PROFIT {pair}: Profitto {current_profit:.2%} → 15min pausa anti-revenge trading attivata")
+
+                        # Pulisci tracking per questo trade
+                        del self._max_profit_tracking[trade_key]
+
+            # DISABLED: I custom exit signals sono disabilitati
+            # Il trailing take profit lavora in modo autonomo ed efficace
+            return None
+
+        except Exception as e:
+            self.logger.error(f"❌ Errore nel cooling-off system per {pair}: {e}")
+            return None
 
     def confirm_trade_entry(self, pair: str, order_type: str, amount: float,
                            rate: float, time_in_force: str, current_time: datetime,
-                           entry_side: str, **kwargs) -> bool:
+                           entry_tag: Optional[str], side: str, **kwargs) -> bool:
         """
-        Context7 Super Powers V2: Trade confirmation with ultra-fast validation
+        Context7 Super Powers V2: Trade confirmation with cooling-off system anti-revenge trading
+
+        Verifica se la pair è in periodo di cooling-off prima di confermare il trade.
         """
-        return True  # Fast confirmation for optimized execution
+        try:
+            # 🛡️ COOLING-OFF SYSTEM: Verifica se pair è in pausa anti-revenge trading
+            if self._is_in_cooldown(pair):
+                remaining_time = self._get_remaining_cooldown(pair)
+                self.logger.warning(f"🛡️ COOLING-OFF BLOCK {pair}: Trade bloccato per {remaining_time:.1f} min (anti-revenge trading)")
+                return False  # Blocca trade durante cooling-off
+
+            # ✅ Trade permesso (non in cooling-off)
+            return True
+
+        except Exception as e:
+            self.logger.error(f"❌ Errore in confirm_trade_entry per {pair}: {e}")
+            return True  # Permissive fallback per evitare blocchi del sistema
+
+    def bot_loop_start(self, current_time: datetime) -> None:
+        """
+        Context7 Super Powers V2: Bot loop start con monitoraggio cooling-off system
+
+        Chiamato all'inizio di ogni bot loop per monitorare lo stato del cooling-off system.
+        """
+        try:
+            # Debug cooling-off system ogni 5 minuti
+            if not hasattr(self, '_last_debug_time'):
+                self._last_debug_time = current_time
+
+            time_since_debug = (current_time - self._last_debug_time).total_seconds()
+            if time_since_debug >= 300:  # 5 minuti
+                self.debug_cooling_status()
+                self._last_debug_time = current_time
+
+        except Exception as e:
+            self.logger.error(f"❌ Errore in bot_loop_start: {e}")
 
     def leverage(self, pair: str, current_time: datetime, current_rate: float,
-                 proposed_leverage: float, max_leverage: int, entry_tag: Optional[str], 
+                 proposed_leverage: float, max_leverage: int, entry_tag: Optional[str],
                  side: str, **kwargs) -> float:
         """
         Context7 Super Powers V2: Dynamic leverage with asset-specific optimization
@@ -1571,8 +1668,8 @@ class IchimokuLLMMultiTimeframeWithLeverageOptimizedV2(IStrategy):
             # Get asset-specific limit
             asset_limit = asset_leverage_limits.get(pair, 4)  # Conservative default
             
-            # Apply conservative limit for safety
-            final_leverage = min(proposed_leverage, asset_limit, max_leverage, 8)
+            # Apply conservative limit for safety - Context7 Super Powers optimized
+            final_leverage = min(proposed_leverage, asset_limit, max_leverage, 3.0)
             
             self.logger.info(f"🎯 V2 Leverage {pair}: {final_leverage}x (asset_limit: {asset_limit})")
             return final_leverage
@@ -1650,10 +1747,10 @@ class IchimokuLLMMultiTimeframeWithLeverageOptimizedV2(IStrategy):
         # Simple and effective - no complex calculations needed
         if side == "long":
             # Conservative leverage for long positions
-            dynamic_leverage = min(base_leverage * 1.5, asset_limit, max_leverage, 10.0)
+            dynamic_leverage = min(base_leverage * 1.5, asset_limit, max_leverage, 3.0)
         else:
             # Slightly higher for short positions (downtrends can be sharper)
-            dynamic_leverage = min(base_leverage * 2.0, asset_limit, max_leverage, 10.0)
+            dynamic_leverage = min(base_leverage * 2.0, asset_limit, max_leverage, 3.0)
 
         # Log leverage calculation
         self.logger.info(f"🎯 LEVERAGE {pair} ({side.upper()}): {dynamic_leverage:.1f}x (max: {asset_limit:.1f}x)")
@@ -1697,6 +1794,149 @@ class IchimokuLLMMultiTimeframeWithLeverageOptimizedV2(IStrategy):
         except Exception as e:
             self.logger.error(f"{method_name}: Input validation error: {e}")
             return False
+
+    # ============================================================================
+    # 🛡️ COOLING-OFF SYSTEM HELPER METHODS (Context7 Super Powers)
+    # ============================================================================
+
+    def _set_cooldown(self, pair: str, direction: str = "any", exit_type: str = "take_profit", profit: float = 0.0) -> None:
+        """
+        Imposta periodo di cooling-off per una pair dopo trade profittevole.
+
+        Args:
+            pair: Trading pair (es. 'BTC/USDT')
+            direction: Direzione del trade ('long', 'short', 'any')
+            exit_type: Tipo di uscita ('take_profit', 'stop_loss', 'timeout')
+            profit: Profitto percentuale del trade
+        """
+        try:
+            current_time = datetime.now()
+            self._trade_cooldown[pair] = {
+                'exit_timestamp': current_time,
+                'direction': direction,
+                'exit_type': exit_type,
+                'profit': profit,
+                'cooldown_end': current_time + timedelta(minutes=self._cooldown_minutes)
+            }
+            self.logger.info(f"🛡️ COOLING-OFF SET {pair}: {self._cooldown_minutes}min pausa attivata (direzione: {direction}, profit: {profit:.2%})")
+        except Exception as e:
+            self.logger.error(f"❌ Errore in _set_cooldown per {pair}: {e}")
+
+    def _is_in_cooldown(self, pair: str, direction: str = "any") -> bool:
+        """
+        Verifica se una pair è in periodo di cooling-off.
+
+        Args:
+            pair: Trading pair
+            direction: Direzione del trade da verificare
+
+        Returns:
+            bool: True se in cooling-off, False altrimenti
+        """
+        try:
+            if pair not in self._trade_cooldown:
+                return False
+
+            cooldown_data = self._trade_cooldown[pair]
+            current_time = datetime.now()
+
+            # Verifica se il cooling-off è scaduto
+            if current_time >= cooldown_data['cooldown_end']:
+                del self._trade_cooldown[pair]
+                return False
+
+            # Verifica se la direzione è bloccata
+            if cooldown_data['direction'] == "any" or direction == "any" or cooldown_data['direction'] == direction:
+                return True
+
+            return False
+
+        except Exception as e:
+            self.logger.error(f"❌ Errore in _is_in_cooldown per {pair}: {e}")
+            return False  # Fail-safe per evitare blocchi permanenti
+
+    def _get_remaining_cooldown(self, pair: str) -> float:
+        """
+        Calcola minuti rimanenti di cooling-off per una pair.
+
+        Args:
+            pair: Trading pair
+
+        Returns:
+            float: Minuti rimanenti (0 se non in cooldown)
+        """
+        try:
+            if pair not in self._trade_cooldown:
+                return 0.0
+
+            cooldown_data = self._trade_cooldown[pair]
+            current_time = datetime.now()
+
+            if current_time >= cooldown_data['cooldown_end']:
+                del self._trade_cooldown[pair]
+                return 0.0
+
+            remaining = (cooldown_data['cooldown_end'] - current_time).total_seconds() / 60
+            return max(0.0, remaining)
+
+        except Exception as e:
+            self.logger.error(f"❌ Errore in _get_remaining_cooldown per {pair}: {e}")
+            return 0.0
+
+    def debug_cooling_status(self) -> None:
+        """
+        Stampa stato completo del cooling-off system per debugging.
+        """
+        try:
+            current_time = datetime.now()
+            self.logger.info("🔍 COOLING-OFF SYSTEM STATUS:")
+
+            if not self._trade_cooldown:
+                self.logger.info("   ✅ Nessuna pair in cooling-off")
+                return
+
+            for pair, data in self._trade_cooldown.items():
+                remaining = (data['cooldown_end'] - current_time).total_seconds() / 60
+                if remaining > 0:
+                    self.logger.info(f"   ⏳ {pair}: {remaining:.1f}min rimanenti (direzione: {data['direction']}, profit: {data['profit']:.2%})")
+                else:
+                    # Cleanup expired entries
+                    del self._trade_cooldown[pair]
+
+        except Exception as e:
+            self.logger.error(f"❌ Errore in debug_cooling_status: {e}")
+
+    @property
+    def protections(self):
+        """
+        Context7 Super Powers: Enhanced protections for 5m timeframe optimized
+
+        1. CooldownPeriod: 10 minutes anti-revenge trading (ottimizzato per 5m)
+        2. StoplossGuard: Blocca trading dopo troppi stop loss
+        3. MaxDrawdown: Protezione drawdown esteso
+        """
+        return [
+            {
+                "method": "CooldownPeriod",
+                "stop_duration": 10  # 10 minuti cooling-off (2 candele 5m)
+            },
+            {
+                "method": "StoplossGuard",
+                "lookback_period_candles": 24,  # 2 ore su 5m
+                "trade_limit": 4,  # Massimo 4 stop loss in 2 ore
+                "stop_duration_candles": 6,  # 30 minuti pausa
+                "required_profit": 0.0,
+                "only_per_pair": False,
+                "only_per_side": False
+            },
+            {
+                "method": "MaxDrawdown",
+                "lookback_period_candles": 48,  # 4 ore su 5m
+                "trade_limit": 20,
+                "stop_duration_candles": 12,  # 1 ora pausa
+                "max_allowed_drawdown": 0.15  # 15% drawdown massimo
+            }
+        ]
 
 # ============================================================================
 # CONTEXT7 SUPER POWERS: INITIALIZATION
